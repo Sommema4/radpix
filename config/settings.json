@@ -1,0 +1,32 @@
+{
+  "acquisition": {
+    "default_frame_time": 1.0,
+    "frame_mode": "frame",
+    "file_format": "clog",
+    "save_data": true,
+    "data_directory": "data"
+  },
+  "reconnection": {
+    "enabled": true,
+    "initial_interval_sec": 30,
+    "max_fast_attempts": 10,
+    "slow_interval_sec": 300,
+    "aggressive_mode_both_offline": true
+  },
+  "logging": {
+    "level": "INFO",
+    "log_directory": "logs",
+    "log_to_console": true,
+    "log_to_file": true
+  },
+  "api": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 5000,
+    "cors_enabled": true
+  },
+  "monitoring": {
+    "health_check_interval_sec": 5,
+    "statistics_update_interval_sec": 1
+  }
+}

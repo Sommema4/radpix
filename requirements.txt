@@ -1,0 +1,8 @@
+# Timepix Control System - Requirements
+
+# Core dependencies
+flask>=2.0.0
+flask-cors>=3.0.0
+
+# Note: pypixet is provided by ADVACAM and must be installed separately
+# along with required DLLs (pxcore.dll, etc.) and hardware libraries
