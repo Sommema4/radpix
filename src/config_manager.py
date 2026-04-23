@@ -177,13 +177,26 @@ class ConfigManager:
         logger.info(f"Updated setting {'.'.join(keys)} = {value}")
     
     def save_settings(self):
-        """Save current settings back to file"""
+        """Save current settings back to settings.json"""
         settings_path = self.config_dir / "settings.json"
         
         with open(settings_path, 'w') as f:
             json.dump(self.settings, f, indent=2)
         
         logger.info("Settings saved to file")
+    
+    def save_devices_config(self):
+        """Save current device configurations back to devices_config.json.
+        
+        Use this to persist per-device field changes (file_format, save_data,
+        data_directory, frame_mode, frame_time, etc.) made at runtime.
+        """
+        config_path = self.config_dir / "devices_config.json"
+        
+        with open(config_path, 'w') as f:
+            json.dump(self.devices_config, f, indent=2)
+        
+        logger.info("Device configurations saved to file")
     
     def reload_configurations(self):
         """Reload all configurations from disk"""

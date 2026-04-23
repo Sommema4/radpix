@@ -180,22 +180,50 @@ class DeviceManager:
             
             # Get device configurations
             device_configs = self.config_manager.get_device_configs()
+            # Build a serial -> config lookup for O(1) matching
+            serial_to_config = {cfg["serial"]: cfg for cfg in device_configs if "serial" in cfg}
+            # Track which configs have been claimed so index-fallback doesn't double-assign
+            claimed_serials = set()
+            
+            dev_info = self.pixet.DevInfo()
             
             # Match devices to configurations
             for idx, device in enumerate(physical_devices):
                 try:
                     device_name = device.fullName()
-                    logger.info(f"Setting up device {idx}: {device_name}")
                     
-                    # Try to match by serial or use first available config
+                    # Resolve serial via DevInfo
+                    device_serial = None
+                    try:
+                        device.deviceInfo(dev_info)
+                        device_serial = dev_info.serial
+                    except Exception as e:
+                        logger.warning(f"Could not read serial for device {idx} ({device_name}): {e}")
+                    
+                    logger.info(f"Setting up device {idx}: {device_name} (serial={device_serial})")
+                    
+                    # Match by serial first, fall back to config index
                     device_config = None
-                    if len(device_configs) > idx:
-                        device_config = device_configs[idx]
+                    if device_serial and device_serial in serial_to_config:
+                        device_config = serial_to_config[device_serial]
+                        claimed_serials.add(device_serial)
+                    else:
+                        if device_serial:
+                            logger.warning(
+                                f"Serial '{device_serial}' not found in config, "
+                                f"falling back to index {idx} assignment"
+                            )
+                        # Fall back: use the idx-th unclaimed config entry
+                        unclaimed = [c for c in device_configs
+                                     if c.get("serial") not in claimed_serials]
+                        if len(unclaimed) > 0:
+                            device_config = unclaimed[0]
+                            claimed_serials.add(device_config.get("serial", ""))
                     
                     if device_config:
                         self._setup_device(device, idx, device_config)
                     else:
-                        logger.warning(f"No configuration found for device {idx}")
+                        logger.warning(f"No configuration found for device {idx} (serial={device_serial})")
                         
                 except Exception as e:
                     logger.error(f"Failed to setup device {idx}: {e}")
@@ -368,6 +396,21 @@ class DeviceManager:
                 # Re-apply configuration
                 config = managed_dev.config
                 
+                # Re-load per-pixel threshold configuration
+                config_file = config.get("config_file")
+                if config_file:
+                    try:
+                        rc = managed_dev.device.loadConfigFromFile(config_file)
+                        if rc == 0:
+                            logger.info(f"Reloaded config file for {managed_dev.status.name}")
+                        else:
+                            logger.warning(
+                                f"Failed to reload config file (rc={rc}), using factory defaults"
+                            )
+                            managed_dev.device.loadFactoryConfig()
+                    except Exception as e:
+                        logger.warning(f"Error reloading config file for {managed_dev.status.name}: {e}")
+                
                 # Set operation mode
                 operation_mode = config.get("operation_mode")
                 if operation_mode:
@@ -420,12 +463,6 @@ class DeviceManager:
             return False
         
         try:
-            # Get frame time from config if not specified
-            if frame_time is None:
-                frame_time = self.config_manager.get_setting("acquisition", "default_frame_time")
-                if frame_time is None:
-                    frame_time = 1.0
-            
             # Apply bias voltages if specified
             if bias_voltages:
                 for dev_id, bias in bias_voltages.items():
@@ -445,7 +482,10 @@ class DeviceManager:
             )
             self.measurement_thread.start()
             
-            logger.info(f"Acquisition started with frame time {frame_time}s")
+            if frame_time is not None:
+                logger.info(f"Acquisition started with frame time {frame_time}s")
+            else:
+                logger.info("Acquisition started (per-device frame times)")
             return True
             
         except Exception as e:
@@ -453,31 +493,15 @@ class DeviceManager:
             self.is_measuring = False
             return False
     
-    def _acquisition_loop(self, frame_time: float):
+    def _acquisition_loop(self, frame_time: Optional[float]):
         """
         Main acquisition loop running in background thread
         
         Args:
-            frame_time: Frame acquisition time in seconds
+            frame_time: Frame acquisition time in seconds (None = use per-device config)
         """
-        acq_settings = self.config_manager.get_acquisition_settings()
-        file_format = acq_settings.get("file_format", "clog")
-        save_data = acq_settings.get("save_data", True)
-        data_dir = acq_settings.get("data_directory", "data")
+        import os
         
-        # Create session directory
-        session_name = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        session_dir = f"{data_dir}/{session_name}"
-        
-        try:
-            import os
-            os.makedirs(session_dir, exist_ok=True)
-            logger.info(f"Saving data to: {session_dir}")
-        except Exception as e:
-            logger.error(f"Failed to create session directory: {e}")
-            save_data = False
-        
-        # Determine file type constant
         file_type_map = {
             "clog": "PX_FTYPE_CLOG",
             "png": "PX_FTYPE_PNG",
@@ -485,11 +509,46 @@ class DeviceManager:
             "none": "PX_FTYPE_NONE"
         }
         
-        file_type_str = file_type_map.get(file_format.lower(), "PX_FTYPE_CLOG")
-        file_type = getattr(self.pixet, file_type_str, None)
+        global_default_frame_time = self.config_manager.get_setting("acquisition", "default_frame_time") or 1.0
+        session_name = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
-        if not save_data:
-            file_type = getattr(self.pixet, "PX_FTYPE_NONE")
+        # Build per-device acquisition parameters
+        device_session_dirs: Dict[int, str] = {}
+        device_file_types: Dict[int, Any] = {}
+        device_save_data: Dict[int, bool] = {}
+        device_frame_times: Dict[int, float] = {}
+        
+        for dev_id, managed_dev in self.managed_devices.items():
+            dev_config = managed_dev.config
+            dev_save_data = dev_config.get("save_data", True)
+            dev_data_dir = dev_config.get("data_directory", "data")
+            dev_file_format = dev_config.get("file_format", "clog")
+            dev_frame_time = frame_time if frame_time is not None else dev_config.get("frame_time", global_default_frame_time)
+            dev_frame_mode = dev_config.get("frame_mode", "frame")
+            if dev_frame_mode != "frame":
+                logger.warning(
+                    f"Device {dev_id}: frame_mode '{dev_frame_mode}' is not yet supported; "
+                    f"using 'frame' mode (doSimpleAcquisition)"
+                )
+            
+            session_dir = f"{dev_data_dir}/{session_name}"
+            if dev_save_data:
+                try:
+                    os.makedirs(session_dir, exist_ok=True)
+                    logger.info(f"Device {dev_id}: saving data to: {session_dir}")
+                except Exception as e:
+                    logger.error(f"Device {dev_id}: failed to create session directory: {e}")
+                    dev_save_data = False
+            
+            file_type_str = file_type_map.get(dev_file_format.lower(), "PX_FTYPE_CLOG")
+            dev_file_type = getattr(self.pixet, file_type_str, None)
+            if not dev_save_data:
+                dev_file_type = getattr(self.pixet, "PX_FTYPE_NONE")
+            
+            device_session_dirs[dev_id] = session_dir
+            device_file_types[dev_id] = dev_file_type
+            device_save_data[dev_id] = dev_save_data
+            device_frame_times[dev_id] = dev_frame_time
         
         frame_counter = 0
         
@@ -507,17 +566,22 @@ class DeviceManager:
                         # Update state to measuring
                         managed_dev.update_state(DeviceState.MEASURING)
                         
+                        dev_save_data = device_save_data[dev_id]
+                        dev_file_type = device_file_types[dev_id]
+                        dev_session_dir = device_session_dirs[dev_id]
+                        dev_frame_time = device_frame_times[dev_id]
+                        
                         # Prepare filename
-                        if save_data and file_type != getattr(self.pixet, "PX_FTYPE_NONE"):
-                            filename = f"{session_dir}/device{dev_id}_frame{frame_counter:06d}"
+                        if dev_save_data and dev_file_type != getattr(self.pixet, "PX_FTYPE_NONE"):
+                            filename = f"{dev_session_dir}/device{dev_id}_frame{frame_counter:06d}"
                         else:
                             filename = ""
                         
                         # Acquire single frame
                         rc = managed_dev.device.doSimpleAcquisition(
                             1,  # count
-                            frame_time,
-                            file_type,
+                            dev_frame_time,
+                            dev_file_type,
                             filename
                         )
                         
@@ -568,6 +632,11 @@ class DeviceManager:
         # Wait for measurement thread to finish
         if self.measurement_thread and self.measurement_thread.is_alive():
             self.measurement_thread.join(timeout=5)
+            if self.measurement_thread.is_alive():
+                logger.warning(
+                    "Measurement thread did not stop within 5s (a long frame may still be in progress). "
+                    "It will be abandoned as a daemon thread."
+                )
         
         # Update device states
         for managed_dev in self.managed_devices.values():

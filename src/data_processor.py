@@ -50,8 +50,11 @@ class FrameData:
 class ClogParser:
     """Parser for CLOG format files"""
     
-    # Regex patterns for CLOG parsing
-    FRAME_PATTERN = re.compile(r'Frame\s+(\d+)\s+\(([0-9.]+),\s+([0-9.]+)\s+s\)')
+    # Regex patterns for CLOG parsing.
+    # Note: FRAME_PATTERN has no leading 'Frame' because parse_file splits the content
+    # on 'Frame ' before calling _parse_frame_section, so each section already starts
+    # with the frame number.
+    FRAME_PATTERN = re.compile(r'(\d+)\s+\(([0-9.]+),\s+([0-9.]+)\s+s\)')
     CLUSTER_PATTERN = re.compile(r'\[([0-9]+),\s*([0-9]+),\s*([0-9.]+)(?:,\s*([0-9.]+))?\]')
     
     @staticmethod
@@ -175,16 +178,36 @@ class ClogParser:
 class DataProcessor:
     """Process and analyze Timepix data files"""
     
-    def __init__(self, data_directory: str = "data"):
+    def __init__(self, data_directories = "data"):
         """
         Initialize data processor
         
         Args:
-            data_directory: Base directory for data files
+            data_directories: Base directory (str) or list of directories for data files.
+                              The first entry is used as the primary directory.
         """
-        self.data_directory = Path(data_directory)
+        if isinstance(data_directories, str):
+            data_directories = [data_directories]
+        self.data_directories = [Path(d) for d in data_directories]
+        self.data_directory = self.data_directories[0]  # kept for backward compatibility
         self.parser = ClogParser()
+        # Cache: filepath -> (file_size_bytes, parsed_frames)
+        # Avoids re-parsing a CLOG file on every frame callback when the file hasn't grown.
+        self._file_cache: Dict[str, tuple] = {}
     
+    def _parse_cached(self, filepath: str) -> List[FrameData]:
+        """Parse a CLOG file, returning a cached result if the file size is unchanged."""
+        try:
+            file_size = Path(filepath).stat().st_size
+        except OSError:
+            return []
+        cached = self._file_cache.get(filepath)
+        if cached is not None and cached[0] == file_size:
+            return cached[1]
+        frames = ClogParser.parse_file(filepath)
+        self._file_cache[filepath] = (file_size, frames)
+        return frames
+
     def process_clog_file(self, filepath: str) -> Dict[str, Any]:
         """
         Process a CLOG file and return summary statistics
@@ -195,7 +218,7 @@ class DataProcessor:
         Returns:
             Dictionary with processing results
         """
-        frames = self.parser.parse_file(filepath)
+        frames = self._parse_cached(filepath)
         
         if not frames:
             return {
@@ -266,24 +289,24 @@ class DataProcessor:
     
     def get_latest_session(self) -> Optional[str]:
         """
-        Get the path to the most recent session directory
+        Get the path to the most recent session directory across all data directories.
         
         Returns:
             Path to latest session or None
         """
-        if not self.data_directory.exists():
+        all_sessions = []
+        for data_dir in self.data_directories:
+            if not data_dir.exists():
+                continue
+            all_sessions.extend(
+                d for d in data_dir.iterdir()
+                if d.is_dir() and d.name.startswith("session_")
+            )
+        
+        if not all_sessions:
             return None
         
-        # Find all session directories
-        session_dirs = [d for d in self.data_directory.iterdir() 
-                       if d.is_dir() and d.name.startswith("session_")]
-        
-        if not session_dirs:
-            return None
-        
-        # Sort by modification time
-        latest_session = max(session_dirs, key=lambda d: d.stat().st_mtime)
-        return str(latest_session)
+        return str(max(all_sessions, key=lambda d: d.stat().st_mtime))
     
     def monitor_file(self, filepath: str, callback) -> Tuple[int, float]:
         """
@@ -308,7 +331,7 @@ class DataProcessor:
                 
                 if current_size > last_size:
                     # File has grown, parse new content
-                    frames = self.parser.parse_file(str(file_path))
+                    frames = self._parse_cached(str(file_path))
                     
                     # Process new frames (those beyond what we've seen)
                     for frame in frames[total_frames:]:
@@ -397,7 +420,7 @@ class DataProcessor:
         Returns:
             Dictionary with latest statistics
         """
-        frames = self.parser.parse_file(filepath)
+        frames = self._parse_cached(filepath)
         
         if not frames:
             return {

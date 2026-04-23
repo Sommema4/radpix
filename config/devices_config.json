@@ -5,18 +5,28 @@
       "name": "TPX_Device_1",
       "type": "TPX",
       "config_file": "config/device_xmls/MiniPIX-I08-W0060.xml",
-      "default_bias": 50.0,
+      "default_bias": 80.0,
       "operation_mode": "PX_TPX3_OPM_TOATOT",
-      "enabled": true
+      "enabled": true,
+      "file_format": "clog",
+      "save_data": true,
+      "data_directory": "data",
+      "frame_mode": "frame",
+      "frame_time": 1.0
     },
     {
       "serial": "I08-W0061",
       "name": "TPX_Device_2",
       "type": "TPX3",
       "config_file": "config/device_xmls/MiniPIX-I08-W0061.xml",
-      "default_bias": 60.0,
+      "default_bias": 80.0,
       "operation_mode": "PX_TPX3_OPM_TOATOT",
-      "enabled": true
+      "enabled": true,
+      "file_format": "clog",
+      "save_data": true,
+      "data_directory": "data",
+      "frame_mode": "frame",
+      "frame_time": 1.0
     }
   ],
   "device_type_operation_modes": {

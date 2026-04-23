@@ -217,18 +217,23 @@ class TimepixAPI:
         
         @self.app.route('/data/sessions', methods=['GET'])
         def list_sessions():
-            """List available data sessions"""
+            """List available data sessions across all device data directories"""
             try:
-                data_dir = Path(self.controller.config_manager.get_setting("acquisition", "data_directory") or "data")
+                device_configs = self.controller.config_manager.get_device_configs()
+                data_dirs = list(dict.fromkeys(
+                    dev.get("data_directory", "data") for dev in device_configs
+                )) if device_configs else ["data"]
                 
-                if not data_dir.exists():
-                    return jsonify({"sessions": []})
+                sessions = set()
+                for data_dir_str in data_dirs:
+                    data_dir = Path(data_dir_str)
+                    if data_dir.exists():
+                        sessions.update(
+                            d.name for d in data_dir.iterdir()
+                            if d.is_dir() and d.name.startswith("session_")
+                        )
                 
-                sessions = [d.name for d in data_dir.iterdir() 
-                           if d.is_dir() and d.name.startswith("session_")]
-                sessions.sort(reverse=True)  # Most recent first
-                
-                return jsonify({"sessions": sessions})
+                return jsonify({"sessions": sorted(sessions, reverse=True)})
                 
             except Exception as e:
                 logger.error(f"Error listing sessions: {e}")
@@ -238,8 +243,21 @@ class TimepixAPI:
         def get_session_data(session_name):
             """Get data from specific session"""
             try:
-                data_dir = self.controller.config_manager.get_setting("acquisition", "data_directory") or "data"
-                session_path = f"{data_dir}/{session_name}"
+                device_configs = self.controller.config_manager.get_device_configs()
+                data_dirs = list(dict.fromkeys(
+                    dev.get("data_directory", "data") for dev in device_configs
+                )) if device_configs else ["data"]
+                
+                # Find which data directory contains this session
+                session_path = None
+                for data_dir_str in data_dirs:
+                    candidate = Path(data_dir_str) / session_name
+                    if candidate.exists():
+                        session_path = str(candidate)
+                        break
+                
+                if session_path is None:
+                    return jsonify({"error": f"Session '{session_name}' not found"}), 404
                 
                 results = self.controller.data_processor.process_session_directory(session_path)
                 return jsonify(results)

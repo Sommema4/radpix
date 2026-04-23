@@ -1,10 +1,6 @@
 {
   "acquisition": {
-    "default_frame_time": 1.0,
-    "frame_mode": "frame",
-    "file_format": "clog",
-    "save_data": true,
-    "data_directory": "data"
+    "default_frame_time": 1.0
   },
   "reconnection": {
     "enabled": true,

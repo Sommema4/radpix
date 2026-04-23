@@ -34,7 +34,7 @@ class TimepixController:
         self._load_config(config_dir)
     
     def _setup_logging(self):
-        """Setup logging configuration"""
+        """Setup initial logging configuration (console INFO, file DEBUG)."""
         # Create logs directory if it doesn't exist
         Path("logs").mkdir(exist_ok=True)
         
@@ -62,11 +62,29 @@ class TimepixController:
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"Logging initialized. Log file: {log_filename}")
     
+    def _reconfigure_logging(self):
+        """Apply logging settings from config (called after config is loaded)."""
+        log_settings = self.config_manager.get_logging_settings()
+        level_name = log_settings.get("level", "INFO").upper()
+        level = getattr(logging, level_name, logging.INFO)
+        
+        root_logger = logging.getLogger()
+        root_logger.setLevel(level)
+        for handler in root_logger.handlers:
+            # Only adjust the console handler; keep file handler at DEBUG
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                handler.setLevel(level)
+        
+        self.logger.debug(f"Logging level reconfigured to {level_name} from settings")
+    
     def _load_config(self, config_dir: str):
         """Load configuration"""
         try:
             self.config_manager = ConfigManager(config_dir)
             self.logger.info("Configuration loaded successfully")
+            
+            # Reconfigure logging now that settings are available
+            self._reconfigure_logging()
             
             # Check for missing config files
             missing_files = self.config_manager.validate_config_files_exist()
@@ -98,10 +116,14 @@ class TimepixController:
                 self.logger.error("Make sure pypixet.pyd and required DLLs are in the path")
                 return False
             
-            # Initialize data processor
-            data_dir = self.config_manager.get_setting("acquisition", "data_directory")
-            self.data_processor = DataProcessor(data_dir or "data")
-            self.logger.info("Data processor initialized")
+            # Initialize data processor with all unique device data directories
+            device_configs = self.config_manager.get_device_configs()
+            # dict.fromkeys preserves insertion order while deduplicating
+            data_dirs = list(dict.fromkeys(
+                dev.get("data_directory", "data") for dev in device_configs
+            )) if device_configs else ["data"]
+            self.data_processor = DataProcessor(data_dirs)
+            self.logger.info(f"Data processor initialized (directories: {data_dirs})")
             
             # Initialize device manager
             self.device_manager = DeviceManager(self.config_manager, self.pypixet)
